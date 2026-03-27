@@ -1,0 +1,142 @@
+(function addServiceWorkerManagerToWindow () {
+	/*
+	 * ServiceWorker URL & scopes for UXF pages 
+	 */
+	const SW_CORE_UXF_SCRIPT_URL = '/uxsw/scope/root.js';
+	const ROOT_SCOPE = '/';
+
+
+	// All possible states are truthy
+	const RegistrationSuccessStates = {
+		UNKNOWN: 3,
+		PENDING: 2,
+		SUCCESS: 1,
+		FAILURE: -1,
+	};
+
+	const serviceWorkerManager = Object.create({
+		registrationStatesOfScopes: {},
+		registeredScopes: [],
+
+		/*
+		 * scope: ServiceWorkerRegistration.scope
+		 * `scope: 'https://my-company.service-now.com/now',`
+		 * https://mzl.la/2XDhn1e
+		 */
+		isScopeInvalid(scope = '') {
+			const scopePath = scope.replace(location.origin, '');
+			if (scope)
+				return !this.registeredScopes.some(registeredScope => registeredScope === scopePath);
+			
+			return true;
+		},
+
+		init (config = {}) {
+			if (config.disabled) {
+				this.deinit();
+				return;
+			}
+
+			if (!this.conditionsAreMet())
+				return;
+
+			// Use the window load event to keep the page load performant
+			const {serviceWorkers = []} = config;
+			if (!serviceWorkers.length) {
+				this.register.call(this, {...config, scope: ROOT_SCOPE});
+				this.registeredScopes.push(ROOT_SCOPE);
+			} else {
+				for (const serviceWorkerRegistration of serviceWorkers) {
+					const {scope, serviceWorkerUrl} = serviceWorkerRegistration;
+					this.registeredScopes.push(scope);
+					this.register.call(this, {scope, serviceWorkerUrl});
+				}
+			}
+			window.addEventListener('load', () => {
+				const deinitWaitTime = 10000;
+				setTimeout(() => {
+					queueMicrotask(this.deinitInvalidScopes.bind(this));
+				}, deinitWaitTime);
+			});
+		},
+
+		forEachRegistration(onEachRegistration) {
+			return navigator.serviceWorker
+				.getRegistrations()
+				.then(function (registrations) {
+					for (const registration of registrations) {
+						onEachRegistration(registration);
+					}
+				});
+		},
+
+		deinit() {
+			return this.forEachRegistration(registration => registration.unregister());
+		},
+
+		update() {
+			this.deinit().then(() => window.location.reload());
+		},
+
+		deinitInvalidScopes() {
+			return this.forEachRegistration(registration => {
+				if (this.isScopeInvalid(registration.scope))
+					registration.unregister();
+			});
+		},
+
+		conditionsAreMet() {
+			if (!window.isSecureContext) {
+				this.logIssue(
+					'Cannot load on an insecure origin'
+				);
+				return false;
+			} else if (!('serviceWorker' in navigator)) {
+				this.logIssue(
+					'Cannot load w/o the ServiceWorker API'
+				);
+				return false;
+			}
+			return true;
+		},
+
+		logIssue (message, {level = 'warn'} = {}) {
+			const log = console[level] || console.info;
+			return log(`[UXServiceWorkerManager] ${message}`);
+		},
+
+		register ({scope = '/', serviceWorkerUrl = SW_CORE_UXF_SCRIPT_URL} = {}) {
+			if (this.registrationStatesOfScopes[scope] === RegistrationSuccessStates.PENDING) {
+				return this.logIssue(`'register' called while registration is pending for scope: ${scope}`);
+			}
+
+			this.registrationStatesOfScopes[scope] = RegistrationSuccessStates.PENDING;
+			
+			/*
+			* ESM ServiceWorkers (type: 'module') are enabled in Chromium 91
+			* - https://bugs.chromium.org/p/chromium/issues/detail?id=824647
+			* - https://www.chromestatus.com/feature/4609574738853888
+			*
+			* We'll revisit this when adoption is wider
+			*/
+			navigator.serviceWorker.register(serviceWorkerUrl, {
+			// https://developers.google.com/web/updates/2019/09/fresher-sw#updateviacache
+				updateViaCache: 'imports',
+				scope,
+			})
+				.then((/* registration */) => {
+					this.registrationStatesOfScopes[scope] = RegistrationSuccessStates.SUCCESS;
+				})
+				.catch(error => {
+					this.registrationStatesOfScopes[scope] = RegistrationSuccessStates.FAILURE;
+					this.logIssue(`Registration failed with ${error} for scope: ${scope}`, {level: 'error'});
+				});
+		}
+	});
+
+	if (window.serviceWorkerManager) {
+		serviceWorkerManager.logIssue('Re-instantiation attempted');
+	} else {
+		window.serviceWorkerManager = serviceWorkerManager;
+	}
+})();
